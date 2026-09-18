@@ -14,7 +14,8 @@
   "packageManager": "bun@1.4.0",
   "type": "module",
   "bin": {
-    "codex-chatgpt-web": "./src/cli.ts"
+    "codex-chatgpt-web": "./src/cli.ts",
+    "chatgpt-browser-api": "./src/chatgpt-browser-api.ts"
   },
   "files": [
     "dist",
@@ -24,6 +25,7 @@
   ],
   "scripts": {
     "start": "bun run src/cli.ts serve",
+    "chatgpt-browser-api": "bun run src/chatgpt-browser-api.ts run",
     "setup": "bun run src/cli.ts setup",
     "doctor": "bun run src/cli.ts doctor",
     "dev:launcher": "bun run src/cli.ts dev launcher",
