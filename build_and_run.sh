@@ -29,7 +29,19 @@ LOG_FILE="$RUNTIME_DIR/chatgpt-browser-api.log"
 LAUNCHER_LOG_FILE="$RUNTIME_DIR/codex-web-gpt-launcher.log"
 CONFIG_FILE="$APP_HOME/config.json"
 LAUNCHER_DESCRIPTOR="$CODEX_WEB_HOME/runtime/launcher-browser.json"
-HOST="${CHATGPT_BROWSER_API_HOST:-127.0.0.1}"
+DEFAULT_HOST="${CHATGPT_BROWSER_API_DEFAULT_HOST:-127.0.0.1}"
+HOST="${CHATGPT_BROWSER_API_HOST:-$DEFAULT_HOST}"
+if [[ -z "${CHATGPT_BROWSER_API_HOST:-}" && -f "$CONFIG_FILE" ]]; then
+  HOST="$(python3 - "$CONFIG_FILE" "$DEFAULT_HOST" <<'PY'
+import json, sys
+try:
+    config = json.load(open(sys.argv[1]))
+    print(config.get("host") or sys.argv[2])
+except Exception:
+    print(sys.argv[2])
+PY
+)"
+fi
 PORT="${CHATGPT_BROWSER_API_PORT:-18082}"
 FULL_HARNESS="${CHATGPT_BROWSER_API_FULL_HARNESS:-1}"
 AUTO_APPROVE_TOOLS="${CHATGPT_BROWSER_API_AUTO_APPROVE_TOOLS:-1}"
