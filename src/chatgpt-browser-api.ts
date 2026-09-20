@@ -966,7 +966,7 @@ function missingWorkspaceIntent(body: Record<string, unknown>): boolean {
   if (hasToolContinuation(body)) return false;
   if (inferWorkspaceRootFromText(body)) return false;
   const text = userVisibleText(body).toLowerCase();
-  return /\b(continuar|retomar|projeto|repo|reposit[oó]rio|workspace|cwd|diret[oó]rio|pasta|branch|git|status|tarefas?|tasks?|roadmap|arquivos?|c[oó]digo|implementar|corrigir|bug|feature)\b/.test(text);
+  return /\b(continuar|retomar|projeto|repo|reposit[oó]rio|workspace|cwd|diret[oó]rio|pasta|branch|git|status|tarefas?|tasks?|roadmap|arquivos?|implementar|corrigir|bug|feature)\b/.test(text);
 }
 
 function missingWorkspaceBody(body: Record<string, unknown>, kind: "chat" | "responses"): Record<string, unknown> | undefined {
