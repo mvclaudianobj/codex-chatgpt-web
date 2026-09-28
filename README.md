@@ -28,6 +28,10 @@ Use the ChatGPT Web models available on your account, including Pro, from Codexâ
 
 Full harness mode connects ChatGPT to the current taskâ€™s files, terminal, tools, and approvals through MCP. Conversations stay tied to your Codex task, so you can keep working as the context grows.
 
+The initial Marks Commander integration is read-only and publishes the resolved workspace in the Native2 turn metadata under `integration.marks_commander`. It is disabled by default. Enable an explicitly configured local Commander with `MARKS_COMMANDER_ENABLED=1` and `MARKS_COMMANDER_TRANSPORT=local`. For a remote Commander, also configure `MARKS_COMMANDER_TRANSPORT=remote`, `MARKS_COMMANDER_ENDPOINT`, and `MARKS_COMMANDER_WORKSPACE_MAP` as a JSON object mapping the local realpath to the remote absolute path; without an explicit mapping or shared-root allowlist, the metadata reports `remote_workspace_unmapped` and does not forward `cwd`. Commander metadata preserves `thread_id`, `turn_id`, `identity`, `cwd`, and `workspace_roots`.
+
+This release does not create an outbound MCP client or invoke Commander tools. Shell, writing, and deletion remain unavailable through this integration.
+
 <div id="get-started"><a id="quick-start"></a></div>
 
 ## Get started

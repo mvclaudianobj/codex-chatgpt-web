@@ -9,6 +9,7 @@ import { createChatGptWebAdapter } from "./adapters/chatgpt-web/index";
 import { buildResponseJSON, formatErrorResponse } from "./bridge";
 import { CHATGPT_WEB_BACKEND_MODEL, CHATGPT_WEB_INSTANT_CONTEXT_WINDOW, CHATGPT_WEB_LUNA_BACKEND_MODEL } from "./chatgpt-web-models";
 import { expandUserPath } from "./config";
+import { commanderConfigFromEnv, commanderWorkspace } from "./marks-commander";
 import type { AdapterEvent, CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest, CodexProviderConfig, CodexTool, CodexToolResultMessage } from "./types";
 import { VERSION } from "./version";
 
@@ -1118,12 +1119,13 @@ function inputFromChatMessages(body: Record<string, unknown>, turnId: string, co
   return config.mode === "full" ? inputWithEnvironmentBeforeActiveUser(input, body, turnId) : input;
 }
 
-function requestMetadata(body: Record<string, unknown>): Record<string, unknown> {
+export function requestMetadata(body: Record<string, unknown>): Record<string, unknown> {
   const metadata = existingCodexMetadata(body) ?? record(body.metadata) ?? {};
   const remembered = rememberedToolTurn(body);
   const threadId = stringField(body.thread_id, metadata.thread_id, metadata.threadId, remembered?.threadId) ?? syntheticId("thread");
   const turnId = stringField(body.turn_id, metadata.turn_id, metadata.turnId, remembered?.turnId) ?? syntheticId("turn");
   const root = workspaceRoot(body);
+  const commander = commanderWorkspace(root, workspaceIdentity(body) || threadId, commanderConfigFromEnv());
   return {
     ...metadata,
     thread_id: threadId,
@@ -1133,6 +1135,10 @@ function requestMetadata(body: Record<string, unknown>): Record<string, unknown>
     sandbox: typeof metadata.sandbox === "string" ? metadata.sandbox : "read-only",
     sandbox_mode: typeof metadata.sandbox_mode === "string" ? metadata.sandbox_mode : "read-only",
     workspaces: record(metadata.workspaces) ?? { [root]: { writable: false } },
+    integration: {
+      ...(record(metadata.integration) ?? {}),
+      marks_commander: { ...commander, thread_id: threadId, turn_id: turnId },
+    },
   };
 }
 
