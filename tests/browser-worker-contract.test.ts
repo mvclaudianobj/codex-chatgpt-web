@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -281,12 +281,6 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
     if (originalInnerText) Object.defineProperty(dom.HTMLElement.prototype, "innerText", originalInnerText);
     else delete dom.HTMLElement.prototype.innerText;
   }
-});
-
-test("a retained MCP conversation reuses its proven connector binding", () => {
-  expect(chatGptConnectorAttachmentMode(true, false)).toBe("mention");
-  expect(chatGptConnectorAttachmentMode(true, true)).toBe("retained");
-  expect(chatGptConnectorAttachmentMode(false, false)).toBe("none");
 });
 
 test("browser turns run concurrently up to the five-tab limit", async () => {
@@ -2332,32 +2326,35 @@ test("an abort while inserting a connector prompt clears the selected pill and p
   expect(connectorSelected).toBeFalse();
 });
 
-test("retained tool turns insert into the connector-bound composer without selecting it again", async () => {
+test("each new tool prompt verifies its connector after the previous Send cleared the mention", async () => {
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
-    attachPrompt(
-      page: unknown,
-      prompt: string,
-      localTools: boolean,
-      captureDiagnostic?: (checkpoint: string) => Promise<void>,
-      abortSignal?: AbortSignal,
-      catalogRefreshAvailable?: boolean,
-      connectorAttemptBudget?: unknown,
-      reuseConnector?: boolean,
-    ): Promise<void>;
+    attachPrompt: (...args: unknown[]) => Promise<void>;
   }).attachPrompt;
-
-  const calls: string[] = [];
+  let selected = false;
+  let selections = 0;
+  const prompts: string[] = [];
   const composer = {
-    fill: async (value: string) => { expect(value).toBe(""); calls.push("fill"); },
-    focus: async () => { calls.push("focus"); },
+    fill: async () => { selected = false; },
+    focus: async () => {},
+    press: async () => {},
   };
-  await attachPrompt.call({
+  const worker = {
     activeComposer: async () => composer,
-    selectConnector: async () => { throw new Error("retained connector must not be selected again"); },
-    insertPromptText: async (_page: unknown, text: string) => { expect(text).toBe("retained context"); calls.push("insert"); },
-    assertPromptAttached: async () => { calls.push("assert"); },
-  }, dialogPage("").page, "retained context", true, undefined, undefined, false, undefined, true);
-  expect(calls).toEqual(["fill", "focus", "insert", "assert"]);
+    selectConnector: async () => { selected = true; selections += 1; return composer; },
+    insertPromptText: async (_page: unknown, text: string) => {
+      if (!selected) throw new Error("The new message has no plugin attached");
+      prompts.push(text.trim());
+    },
+    assertPromptAttached: async () => {},
+    clearChatGptComposerState: async () => { selected = false; },
+  };
+  const page = dialogPage("").page;
+  await attachPrompt.call(worker, page, "first task", true);
+  // Sending clears the editor's mention; retaining this tab does not attach the next message.
+  selected = false;
+  await attachPrompt.call(worker, page, "follow-up task", true);
+  expect(selections).toBe(2);
+  expect(prompts).toEqual(["first task", "follow-up task"]);
 });
 
 test("image attachment readiness uses exact file tiles and not localized remove-button text", async () => {
@@ -2541,9 +2538,9 @@ test("Think slash requires one command and verifies a newly exposed control", as
   expect(unavailable.state.enters).toBe(0);
 });
 
-test("Think attachment runs after fresh connector selection and rechecks retained and Browser-only turns", async () => {
+test("Think attachment preserves the plugin on first and follow-up messages and supports Browser-only turns", async () => {
   const attach = (ChatGptBrowserWorker.prototype as unknown as { attachPrompt: (...args: unknown[]) => Promise<void> }).attachPrompt;
-  for (const [localTools, retained] of [[true, false], [true, true], [false, false]]) {
+  for (const localTools of [true, false]) {
     const ui = thinkSlashFixture();
     let connectorSelections = 0;
     const submitted: boolean[] = [];
@@ -2553,17 +2550,16 @@ test("Think attachment runs after fresh connector selection and rechecks retaine
       insertPromptText: async () => { submitted.push(ui.state.pressed); },
       assertPromptAttached: async () => {}, clearChatGptComposerState: async () => { ui.state.draft = ""; ui.state.connectors = []; },
     };
-    await attach.call(worker, ui.page, "requested task", localTools, undefined, undefined, false, undefined, retained, true);
+    await attach.call(worker, ui.page, "requested task", localTools, undefined, undefined, false, undefined, true);
     expect(submitted).toEqual([true]);
-    expect(connectorSelections).toBe(localTools && !retained ? 1 : 0);
-    if (localTools && !retained) expect(ui.state.connectors).toEqual(["Codex Native2"]);
-    if (retained) {
-      ui.state.pressed = false;
-      await attach.call(worker, ui.page, "follow-up task", localTools, undefined, undefined, false, undefined, retained, true);
-      expect(submitted).toEqual([true, true]);
-      expect(ui.state.commands).toEqual(["/think", "/think"]);
-      expect(connectorSelections).toBe(0);
-    }
+    expect(connectorSelections).toBe(localTools ? 1 : 0);
+    if (localTools) expect(ui.state.connectors).toEqual(["Codex Native2"]);
+    ui.state.pressed = false;
+    ui.state.connectors = [];
+    await attach.call(worker, ui.page, "follow-up task", localTools, undefined, undefined, false, undefined, true);
+    expect(submitted).toEqual([true, true]);
+    expect(ui.state.commands).toEqual(["/think", "/think"]);
+    expect(connectorSelections).toBe(localTools ? 2 : 0);
   }
 });
 
@@ -2578,7 +2574,7 @@ test("Think attachment rolls back a lost connector and never inserts the prompt"
     clearChatGptComposerState: async () => { cleanup += 1; ui.state.draft = ""; ui.state.connectors = []; },
   };
   const attach = (ChatGptBrowserWorker.prototype as unknown as { attachPrompt: (...args: unknown[]) => Promise<void> }).attachPrompt;
-  await expect(attach.call(worker, ui.page, "must not be inserted", true, undefined, undefined, false, undefined, false, true))
+  await expect(attach.call(worker, ui.page, "must not be inserted", true, undefined, undefined, false, undefined, true))
     .rejects.toThrow("selected connectors");
   expect(insertions).toBe(0);
   expect(cleanup).toBe(1);
@@ -2792,7 +2788,8 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
 test("only a size rejection of the current owned browser submission is non-retryable", async () => {
   const frame = {};
   const page = Object.assign(new EventEmitter(), { mainFrame: () => frame });
-  const observer = new ChatGptSubmissionRejectionObserver();
+  const rejected: unknown[] = [];
+  const observer = new ChatGptSubmissionRejectionObserver(error => rejected.push(error));
   const makeRequest = (url = "https://chatgpt.com/backend-api/f/conversation", owner = frame) => ({
     method: () => "POST", url: () => url, frame: () => owner,
   });
@@ -2815,14 +2812,27 @@ test("only a size rejection of the current owned browser submission is non-retry
   const successful = makeRequest(); page.emit("request", successful); respond(successful, "message_length_exceeds_limit", 200);
   const unfamiliar = makeRequest(); page.emit("request", unfamiliar); respond(unfamiliar, "unknown_error");
   expect(await observer.failure()).toBeUndefined();
+  expect(rejected).toEqual([]);
   const current = makeRequest(); page.emit("request", current); respond(current);
   expect(await observer.failure()).toMatchObject({
     status: 400, code: "context_length_exceeded", errorType: "invalid_request_error", retryable: false,
   });
+  expect(rejected).toHaveLength(1);
   observer.begin(page as unknown as Page);
   expect(await observer.failure()).toBeUndefined();
   respond(current);
   expect(await observer.failure()).toBeUndefined();
+  let finishOldBody!: (body: unknown) => void;
+  const delayed = makeRequest(); page.emit("request", delayed);
+  page.emit("response", {
+    request: () => delayed, status: () => 413, headers: () => ({ "content-type": "application/json" }),
+    json: () => new Promise(resolve => { finishOldBody = resolve; }),
+  });
+  const oldFailure = observer.failure();
+  observer.begin(page as unknown as Page);
+  finishOldBody({ detail: { code: "message_length_exceeds_limit" } });
+  expect(await oldFailure).toBeUndefined();
+  expect(rejected).toHaveLength(1);
   observer.dispose();
   expect(page.listenerCount("request")).toBe(0);
   expect(page.listenerCount("response")).toBe(0);
@@ -3091,7 +3101,7 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
 function toolConfirmationPage(options: {
   disappearAfterReads?: number;
   surface?: "dialog" | "card";
-  allowLabel?: "Allow once" | "Allow";
+  allowLabel?: "Allow once" | "Allow" | "Always allow";
 } = {}): {
   page: Page;
   pressed: string[];
@@ -3153,22 +3163,28 @@ function toolConfirmationPage(options: {
 
 test("manual ChatGPT connector approval pauses and resumes the same browser turn", async () => {
   const fixture = toolConfirmationPage({ disappearAfterReads: 3 });
-
-  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 100)).toBeTrue();
+  const pending: boolean[] = [];
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 100,
+    undefined, async value => { pending.push(value); })).toBeTrue();
+  expect(pending).toEqual([true, false]);
   expect(fixture.pressed).toEqual([]);
 });
 
 test("an unanswered ChatGPT connector approval is denied instead of aborting the turn", async () => {
   const fixture = toolConfirmationPage();
-
-  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2)).toBeTrue();
+  const pending: boolean[] = [];
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2,
+    undefined, async value => { pending.push(value); })).toBeTrue();
+  expect(pending).toEqual([true, false]);
   expect(fixture.pressed).toEqual(["Deny:Enter"]);
 });
 
 test("explicit connector auto-approval still selects Allow once", async () => {
   const fixture = toolConfirmationPage();
-
-  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  const pending: boolean[] = [];
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true, undefined, 100,
+    undefined, async value => { pending.push(value); })).toBeTrue();
+  expect(pending).toEqual([]);
   expect(fixture.pressed).toEqual(["Allow once:Enter"]);
 });
 
@@ -3177,6 +3193,31 @@ test("connector auto-approval accepts the current shortened Allow action", async
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow:Enter"]);
+});
+
+test("cancelling while an approval is pending clears the notice without choosing a button", async () => {
+  const fixture = toolConfirmationPage();
+  const controller = new AbortController();
+  const pending: boolean[] = [];
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, controller.signal, 100,
+    undefined, async value => { pending.push(value); if (value) controller.abort(); }))
+    .rejects.toMatchObject({ name: "AbortError" });
+  expect(pending).toEqual([true, false]);
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("cancellation before auto-approval never grants permission", async () => {
+  const fixture = toolConfirmationPage();
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", true, AbortSignal.abort()))
+    .rejects.toMatchObject({ name: "AbortError" });
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("one-time auto-approval never selects a permanent permission", async () => {
+  const fixture = toolConfirmationPage({ allowLabel: "Always allow" });
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", true))
+    .rejects.toThrow("Approval button not found");
+  expect(fixture.pressed).toEqual([]);
 });
 
 test("auto-approval recognizes the observed non-dialog approval card", async () => {

@@ -447,23 +447,23 @@ test("catalog verification reports a failed request instead of requesting anothe
   assert.ok(events.some(([event]) => event === "codex.model_catalog_verified"));
 });
 
-test("fresh-conversation IPC commits only after setup succeeds and refuses active browser work", async () => {
+test("browser preference IPC commits only after setup succeeds and refuses active browser work", async () => {
   const vm = require("node:vm");
-  for (const savedChats of [false, true]) {
-    const property = savedChats ? "useSavedChats" : "experimentalFreshConversationPerTurn";
-    const method = savedChats ? "setUseSavedChats" : "setFreshConversationPerTurn";
-    const channel = savedChats ? "launcher:use-saved-chats" : "launcher:fresh-conversation-per-turn";
-    const nextChannel = savedChats ? "launcher:zero-risk-pro" : "launcher:use-saved-chats";
+  for (const [property, method, channel, nextChannel] of [
+    ["experimentalFreshConversationPerTurn", "setFreshConversationPerTurn", "launcher:fresh-conversation-per-turn", "launcher:use-saved-chats"],
+    ["useSavedChats", "setUseSavedChats", "launcher:use-saved-chats", "launcher:auto-approve-tool-calls"],
+    ["autoApproveToolCalls", "setAutoApproveToolCalls", "launcher:auto-approve-tool-calls", "launcher:zero-risk-pro"],
+  ]) {
     const source = electronMain.slice(
       electronMain.indexOf(`handle("${channel}",`),
       electronMain.indexOf(`handle("${nextChannel}",`),
     );
-    const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false };
-    const config = { experimentalFreshConversationPerTurn: false, useSavedChats: false };
+    const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
+    const config = { experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false };
     const events = [];
     let handler, finishSetup, setupFailure, calls = 0;
     const browserHost = { activeTraceId: "running-turn", currentOperation: () => null, turnTabs: new Map() };
-    const syncSource = electronMain.slice(electronMain.indexOf("function syncFreshConversationPreference("), electronMain.indexOf("function registerIpc("));
+    const syncSource = electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("function registerIpc("));
     vm.runInNewContext(syncSource + source, {
       handle: (_channel, callback) => { handler = callback; }, browserHost,
       releaseRetainedConversation: require("../electron/retained-turn-release.cjs").releaseRetainedConversation,
@@ -529,7 +529,7 @@ test("fresh-conversation snapshot uses runtime configuration and mode switching 
     process: { platform: "darwin" }, app: { isPackaged: false, getVersion: () => "test" },
     smokePassedThisSession: false, smokePassedForCurrentVersion: () => false, lastOperation: null, updateController: null,
   };
-  vm.runInNewContext(electronMain.slice(electronMain.indexOf("function syncFreshConversationPreference("), electronMain.indexOf("function registerIpc(")) +
+  vm.runInNewContext(electronMain.slice(electronMain.indexOf("function syncBrowserPreferences("), electronMain.indexOf("function registerIpc(")) +
     electronMain.slice(electronMain.indexOf('handle("launcher:snapshot",'),
     electronMain.indexOf('handle("launcher:set-language",')) +
     electronMain.slice(electronMain.indexOf('handle("launcher:browser-interaction-mode",'),
@@ -547,7 +547,7 @@ test("fresh-conversation snapshot uses runtime configuration and mode switching 
   assert.equal((await snapshot()).state.experimentalFreshConversationPerTurn, false);
 });
 
-test("fresh-conversation control is translated, disabled in Zero Risk, and invokes the async setting", async () => {
+test("browser preference controls are translated, disabled in Zero Risk, and invoke their settings", async () => {
   const ts = require("typescript");
   const vm = require("node:vm");
   const settings = appSource.slice(appSource.indexOf("function SettingsSurface("), appSource.indexOf("function ContentSurface("));
@@ -562,7 +562,10 @@ test("fresh-conversation control is translated, disabled in Zero Risk, and invok
     element: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: value => [value, () => {}],
     useEffect() {},
-    api: { setFreshConversationPerTurn: async enabled => { invocation = enabled; return { experimentalFreshConversationPerTurn: enabled }; } },
+    api: {
+      setFreshConversationPerTurn: async enabled => { invocation = enabled; return { experimentalFreshConversationPerTurn: enabled }; },
+      setAutoApproveToolCalls: async enabled => { invocation = enabled; return { autoApproveToolCalls: enabled }; },
+    },
     messageOf: String, platformLabel: String,
   };
   for (const name of ["ContentSurface", "SectionHeading", "SettingRow", "PrimaryButton", "SecondaryButton", "Switch", "InteractionModePicker", "LanguageMenu", "NoticeRow", "Icon", "DoctorSummary", "BrandMark"]) sandbox[name] = name;
@@ -572,29 +575,87 @@ test("fresh-conversation control is translated, disabled in Zero Risk, and invok
     ? [tree, ...visit(tree.children ?? [])] : [];
   for (const language of Object.keys(require("../electron/languages.json"))) {
     const copy = translated.exports.copyFor(language);
-    for (const key of ["freshConversation", "freshConversationBody", "manualFreshConversationUnavailable"]) {
-      assert.equal(typeof copy[key], "string");
-      assert.ok(copy[key].length > 10);
-    }
-    for (const [mode, configured, enabled] of [["automatic", true, false], ["manual", true, true], ["automatic", false, false]]) {
-      const tree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
-        snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: mode, coreSetupComplete: configured, experimentalFreshConversationPerTurn: enabled } },
-        updateState: value => { saved = value; },
-      });
-      const row = visit(tree).find(node => node.type === "SettingRow" && node.props.label === copy.freshConversation);
-      assert.ok(row);
-      assert.equal(row.props.body, mode === "manual" ? copy.manualFreshConversationUnavailable : copy.freshConversationBody);
-      const control = visit(row).find(node => node.type === "Switch");
-      assert.equal(control.props.checked, enabled);
-      assert.equal(control.props.disabled, mode === "manual" || !configured);
-      if (!control.props.disabled) {
-        control.props.onChange(true);
-        await new Promise(resolve => setImmediate(resolve));
-        assert.equal(invocation, true);
-        assert.equal(saved.experimentalFreshConversationPerTurn, true);
+    for (const [property, label, body, unavailable] of [
+      ["experimentalFreshConversationPerTurn", "freshConversation", "freshConversationBody", "manualFreshConversationUnavailable"],
+      ["autoApproveToolCalls", "autoApproveTools", "autoApproveToolsBody", "manualAutoApproveUnavailable"],
+    ]) {
+      for (const key of [label, body, unavailable, "toolApprovalNeeded", "toolApprovalPendingBody"]) {
+        assert.equal(typeof copy[key], "string");
+        assert.ok(copy[key].length > 5);
+      }
+      for (const [mode, configured, enabled] of [["automatic", true, false], ["automatic", true, true], ["manual", true, true], ["automatic", false, false]]) {
+        const tree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
+          snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: mode, coreSetupComplete: configured, [property]: enabled } },
+          updateState: value => { saved = value; },
+        });
+        const row = visit(tree).find(node => node.type === "SettingRow" && node.props.label === copy[label]);
+        assert.ok(row);
+        assert.equal(row.props.body, mode === "manual" ? copy[unavailable] : copy[body]);
+        const control = visit(row).find(node => node.type === "Switch");
+        assert.equal(control.props.checked, property === "autoApproveToolCalls" && mode === "manual" ? false : enabled);
+        assert.equal(control.props.disabled, mode === "manual" || !configured);
+        if (!control.props.disabled) {
+          control.props.onChange(!enabled);
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(invocation, !enabled);
+          assert.equal(saved[property], !enabled);
+        }
       }
     }
   }
+});
+
+test("approval notices are visible outside Browser and open the exact waiting tab", async () => {
+  const ts = require("typescript");
+  const vm = require("node:vm");
+  const shell = appSource.slice(appSource.indexOf("function LauncherShell("), appSource.indexOf("function TitleBar("));
+  const calls = [];
+  let hookIndex = 0;
+  let currentSurface = "settings";
+  const sandbox = {
+    element: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: value => [hookIndex++ === 0 ? currentSurface : value, () => {}],
+    useRef: value => ({ current: value }), useEffect() {}, useLayoutEffect() {}, useCallback: callback => callback,
+    window: { matchMedia: () => ({ matches: false }) }, COMPACT_SIDEBAR_QUERY: "fixture",
+    useLimits: () => ({}), limitsCopyFor: () => ({}), browserTabTitleFromTitle: title => title,
+    motion: { main: "main", aside: "aside", div: "div" },
+    messageOf: String,
+    api: {
+      selectBrowserTab: async id => { calls.push(["select", id]); },
+      setBrowserSurfaceActive: async active => { calls.push(["surface", active]); },
+      showBrowser: async () => { calls.push(["show"]); },
+    },
+  };
+  for (const name of new Set([...shell.matchAll(/<([A-Z][A-Za-z]+)/g)].map(match => match[1]))) sandbox[name] = name;
+  vm.runInNewContext(ts.transpileModule(shell, { compilerOptions: {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, jsxFactory: "element",
+  }, fileName: "shell.tsx" }).outputText + "\nrender = LauncherShell;", sandbox);
+  const tab = { id: "waiting", title: "ChatGPT 2", status: "running", approvalPending: true };
+  const other = { id: "selected", title: "ChatGPT 1", status: "running", active: true };
+  const props = {
+    browser: { authenticated: true, visible: false, tabs: [other, tab] },
+    copy: { toolApprovalNeeded: "ChatGPT needs your approval", toolApprovalPendingBody: "Choose Allow once or Deny", openChatgpt: "Open ChatGPT" },
+    language: "en", logs: [], operation: null, updateState() {}, setError(error) { throw new Error(error); },
+    snapshot: { state: { browserInteractionMode: "automatic", coreSetupComplete: true,
+      codexCatalogVerified: true, experimentalBiggerContext: true }, update: { status: "idle" }, profile: "production" },
+  };
+  const visit = tree => Array.isArray(tree) ? tree.flatMap(visit) : tree && typeof tree === "object"
+    ? [tree, ...visit(tree.children ?? [])] : [];
+  const render = () => { hookIndex = 0; return visit(sandbox.render(props)); };
+  for (currentSurface of ["settings", "browser"]) {
+    const notice = render().find(node => node.props.className === "tool-approval-notice");
+    assert.ok(notice);
+    assert.equal(notice.props.role, "status");
+    const button = visit(notice).find(node => node.type === "SecondaryButton");
+    button.props.onClick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls.splice(0), [["select", "waiting"], ["surface", true], ["show"]]);
+  }
+  tab.approvalPending = false;
+  assert.equal(render().some(node => node.props.className === "tool-approval-notice"), false);
+  tab.approvalPending = true;
+  tab.status = "ready";
+  assert.equal(render().some(node => node.props.className === "tool-approval-notice"), false);
 });
 
 test("plugin rename invalidates verification only after success and rejects active browser work", async () => {

@@ -8,7 +8,14 @@ import { chatGptBrowserTabClosedError } from "../src/adapters/chatgpt-web/adapte
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
-test.each([[true, false, true], [false, false, true], [true, true, true], [true, false, false]])("browser turns preserve recovery, ordering and final-only tools (owned=%s, tools=%s, multipart=%s)", async (owned, tools, multipart) => {
+test.each([
+  [true, false, true, false, false],
+  [false, false, true, false, false],
+  [true, true, true, false, false],
+  [true, false, false, false, false],
+  [true, false, true, true, false],
+  [true, true, false, false, true],
+])("browser turns preserve recovery, ordering and final-only tools (owned=%s, tools=%s, multipart=%s, size rejected=%s, retained=%s)", async (owned, tools, multipart, sizeRejected, retained) => {
   const diagnostics = mkdtempSync(join(tmpdir(), "compaction-observation-"));
   const cancellationCase = owned && !tools && !multipart;
   const effort = tools ? "xhigh" : "high";
@@ -21,6 +28,8 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
   let stage = "";
   let released = false;
   let activated = 0;
+  let freshChatPreparations = 0;
+  let rejectionAbortedWait = false;
   const frame = {};
   const page = Object.assign(new EventEmitter(), { evaluate: async () => ({}), isClosed: () => false, mainFrame: () => frame });
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -30,7 +39,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       if (name === "send" || name.endsWith("_send")) sendBudgets.push(timeout);
       return action(new AbortController().signal);
     },
-    prepareChatSurface: async () => {},
+    prepareChatSurface: async () => { freshChatPreparations += 1; },
     selectModelAndEffort: async (_page: unknown, model: string, effort: string, _capabilities: unknown,
       _diagnostic: unknown, trackUsage: boolean, family: string) => {
       expect(trackUsage).toBe(false);
@@ -54,7 +63,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       const lifecycle = args[5] as { onSendActivated(): Promise<void>; onSubmitted?: () => void };
       if (stage !== "send") expect(lifecycle.onSubmitted).toBeUndefined();
       await lifecycle.onSendActivated();
-      if (cancellationCase) {
+      if (cancellationCase || (sizeRejected && stage === "multipart_stage_2_send")) {
         // An observed size rejection must not replace the user's explicit tab-close verdict.
         const request = { method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation", frame: () => frame };
         page.emit("request", request);
@@ -72,12 +81,42 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       recoveryCallbacks.push(args[7]);
       actions.push("observe");
       if (stage === "send") throw finalResponse;
+      if (sizeRejected && stage === "multipart_stage_2_acknowledgement") {
+        const signal = args[3] as AbortSignal;
+        await new Promise((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("rejected stage kept waiting")), 250);
+          const onAbort = () => { clearTimeout(timer); rejectionAbortedWait = true; reject(signal.reason); };
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
       return {};
     },
     waitForMultipartAcknowledgement: async () => { actions.push("ack"); },
   });
+  if (retained) {
+    // Exercise the real attachment path: the previous Send cleared its mention,
+    // even though this conversation still belongs to the same launcher task.
+    let connectorSelected = false;
+    const composer = {
+      fill: async () => { connectorSelected = false; },
+      focus: async () => {}, press: async () => {},
+    };
+    const absentDialog = { filter: () => absentDialog, last: () => absentDialog, isVisible: async () => false };
+    Object.assign(page, { locator: () => absentDialog });
+    Object.assign(worker, {
+      attachPrompt: (ChatGptBrowserWorker.prototype as any).attachPrompt,
+      attachPromptWithCompactionRetry: (ChatGptBrowserWorker.prototype as any).attachPromptWithCompactionRetry,
+      activeComposer: async () => composer,
+      selectConnector: async () => { connectorSelected = true; actions.push("attach:tools"); return composer; },
+      insertPromptText: async () => { expect(connectorSelected).toBeTrue(); },
+      assertPromptAttached: async () => {},
+      clearChatGptComposerState: async () => { connectorSelected = false; },
+    });
+  }
+  const prepare = async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "Summarize" } : undefined, release: () => { released = true; } });
   try {
-    await expect(worker.runBrowserTurn({
+    const run = worker.runBrowserTurn({
       traceId: "compaction_recovery_fixture",
       modelId: "gpt-5.6-sol",
       modelFamily: "5.6",
@@ -90,8 +129,21 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
         begin: async () => { throw new Error("fixture must stop before completion"); },
         commit: async () => { throw new Error("fixture must stop before completion"); },
       } : undefined,
-      prepare: async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "Summarize" } : undefined, release: () => { released = true; } }),
-    }, owned ? "owned-surface" : undefined, page)).rejects.toBe(finalResponse);
+      prepare,
+      prepareResume: prepare,
+    }, owned ? "owned-surface" : undefined, page, retained);
+    if (sizeRejected) {
+      await expect(run).rejects.toMatchObject({ code: "context_length_exceeded", retryable: false });
+      expect(rejectionAbortedWait).toBeTrue();
+      expect(sendBudgets).toHaveLength(2);
+      expect(actions.filter(action => action === "ack")).toHaveLength(1);
+      expect(released).toBeTrue();
+      expect(page.listenerCount("request")).toBe(0);
+      expect(page.listenerCount("response")).toBe(0);
+      return;
+    }
+    await expect(run).rejects.toBe(finalResponse);
+    expect(freshChatPreparations).toBe(retained ? 0 : 1);
     expect(recoveryCallbacks.map(callback => typeof callback)).toEqual(
       Array(multipart ? 12 : 2).fill(owned ? "function" : "undefined"),
     );
