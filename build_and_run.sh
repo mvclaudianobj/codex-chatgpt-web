@@ -15,6 +15,8 @@ if [[ "${EUID:-$(id -u)}" == "0" && "${CHATGPT_BROWSER_API_ALLOW_ROOT:-0}" != "1
   exec runuser -u marcos -- "$0" "$@"
 fi
 
+umask 077
+
 DEFAULT_HOME="$HOME"
 if [[ "$DEFAULT_HOME" == "/root" && -d "/home/marcos" ]]; then
   DEFAULT_HOME="/home/marcos"
@@ -47,7 +49,8 @@ FULL_HARNESS="${CHATGPT_BROWSER_API_FULL_HARNESS:-1}"
 AUTO_APPROVE_TOOLS="${CHATGPT_BROWSER_API_AUTO_APPROVE_TOOLS:-1}"
 LOG_LEVEL="${CHATGPT_BROWSER_API_LOG_LEVEL:-info}"
 
-mkdir -p "$RUNTIME_DIR"
+mkdir -p -m 700 "$APP_HOME" "$RUNTIME_DIR"
+chmod 700 "$APP_HOME" "$RUNTIME_DIR"
 
 pid_value() {
   local file="$1"
@@ -145,9 +148,11 @@ start_launcher() {
   else
     cd "$ROOT_DIR"
     : > "$LAUNCHER_LOG_FILE"
+    chmod 600 "$LAUNCHER_LOG_FILE"
     ELECTRON_DISABLE_GPU=1 ELECTRON_EXTRA_LAUNCH_ARGS="--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --disable-features=UseOzonePlatform" DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" CODEX_CHATGPT_WEB_HOME="$CODEX_WEB_HOME" CODEX_WEB_GPT_BUN="$BUN_BIN" CODEX_CHATGPT_WEB_BUN="$BUN_BIN" nohup "$BUN_BIN" run --cwd launcher start >>"$LAUNCHER_LOG_FILE" 2>&1 &
     pid=$!
     echo "$pid" > "$LAUNCHER_PID_FILE"
+    chmod 600 "$LAUNCHER_PID_FILE"
     echo "launcher visual iniciado pid=$pid"
     echo "launcher log: $LAUNCHER_LOG_FILE"
   fi
@@ -180,9 +185,11 @@ start_api() {
   wait_broker_socket
   cd "$ROOT_DIR"
   : > "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
   CHATGPT_BROWSER_API_HOME="$APP_HOME" CODEX_CHATGPT_WEB_HOME="$CODEX_WEB_HOME" CHATGPT_BROWSER_API_HOST="$HOST" CHATGPT_BROWSER_API_PORT="$PORT" CHATGPT_BROWSER_API_FULL_HARNESS="$FULL_HARNESS" CHATGPT_BROWSER_API_AUTO_APPROVE_TOOLS="$AUTO_APPROVE_TOOLS" CHATGPT_BROWSER_API_LOG_LEVEL="$LOG_LEVEL" nohup "$BUN_BIN" run src/chatgpt-browser-api.ts run >>"$LOG_FILE" 2>&1 &
   pid=$!
   echo "$pid" > "$PID_FILE"
+  chmod 600 "$PID_FILE"
   sleep 1
   if ! is_running "$pid"; then
     echo "falha ao iniciar API. Logs:" >&2
@@ -286,11 +293,13 @@ status() {
 
 logs() {
   touch "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
   tail -n "${LINES:-120}" -f "$LOG_FILE"
 }
 
 launcher_logs() {
   touch "$LAUNCHER_LOG_FILE"
+  chmod 600 "$LAUNCHER_LOG_FILE"
   tail -n "${LINES:-120}" -f "$LAUNCHER_LOG_FILE"
 }
 

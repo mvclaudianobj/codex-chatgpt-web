@@ -36,8 +36,11 @@ export async function selectChatGptModelFamily(
     if (await powerView.count() === 1) {
       const view = await powerView.getAttribute("data-model-picker-view");
       if (view === "simple") {
-        const trigger = powerView.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]');
-        if (await trigger.count() !== 1) throw familyError(family);
+        const trigger = powerView.locator('[data-model-picker-view-toggle="true"]').filter({ visible: true });
+        if (await trigger.count() !== 1
+          || await trigger.evaluate(element => Boolean(element.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [disabled]')))) {
+          throw familyError(family);
+        }
         await trigger.click({ timeout: 5_000 });
       } else if (view !== "advanced") throw familyError(family);
     } else {

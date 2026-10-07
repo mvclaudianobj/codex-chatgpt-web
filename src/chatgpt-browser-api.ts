@@ -7,13 +7,20 @@ import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worke
 import { closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { createChatGptWebAdapter } from "./adapters/chatgpt-web/index";
 import { buildResponseJSON, formatErrorResponse } from "./bridge";
-import { CHATGPT_WEB_BACKEND_MODEL, CHATGPT_WEB_INSTANT_CONTEXT_WINDOW, CHATGPT_WEB_LUNA_BACKEND_MODEL } from "./chatgpt-web-models";
+import {
+  availableChatGptWebModelRoutes,
+  CHATGPT_WEB_BACKEND_MODEL,
+  CHATGPT_WEB_INSTANT_CONTEXT_WINDOW,
+  CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  requireChatGptWebModelRoute,
+  type ChatGptWebModelRoute,
+} from "./chatgpt-web-models";
 import { expandUserPath } from "./config";
 import { commanderConfigFromEnv, commanderWorkspace } from "./marks-commander";
 import type { AdapterEvent, CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest, CodexProviderConfig, CodexTool, CodexToolResultMessage } from "./types";
 import { VERSION } from "./version";
 
-type ChatGptBrowserApiConfig = {
+export type ChatGptBrowserApiConfig = {
   host: string;
   port: number;
   apiKey: string;
@@ -52,6 +59,7 @@ type ActiveAppInfo = {
 
 const DEFAULT_MODEL = "gpt-5.6-sol";
 const MARKSCODE_BROWSER_MODELS = ["browser-agent/gpt", "browser-agent-gpt"] as const;
+const STANDALONE_MODEL_ALIASES = new Set([DEFAULT_MODEL, CHATGPT_WEB_LUNA_BACKEND_MODEL, ...MARKSCODE_BROWSER_MODELS]);
 const MARKSCODE_LOCAL_API_KEYS = new Set(["local-proxy2", "marks-local2"]);
 const TOOL_TURN_TTL_MS = 30 * 60_000;
 const TOOL_CONTINUATION_TTL_MS = 10 * 60_000;
@@ -1301,12 +1309,6 @@ function normalizeLocalInspectionBody(body: Record<string, unknown>, config: Cha
   };
 }
 
-function adapterModelId(body: Record<string, unknown>, config: ChatGptBrowserApiConfig): string {
-  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : config.model;
-  if (model === CHATGPT_WEB_LUNA_BACKEND_MODEL || model === "luna") return CHATGPT_WEB_LUNA_BACKEND_MODEL;
-  return CHATGPT_WEB_BACKEND_MODEL;
-}
-
 function reasoningEffort(body: Record<string, unknown>): string | undefined {
   const reasoning = record(body.reasoning);
   const effort = typeof reasoning?.effort === "string" ? reasoning.effort : typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined;
@@ -1314,13 +1316,44 @@ function reasoningEffort(body: Record<string, unknown>): string | undefined {
   return effort === "ultra" ? "max" : effort;
 }
 
-function parsedRequest(body: Record<string, unknown>, config: ChatGptBrowserApiConfig, kind: "chat" | "responses"): CodexParsedRequest {
-  const model = adapterModelId(body, config);
+function canonicalStandaloneModelId(model: string, effort: string | undefined, config: ChatGptBrowserApiConfig): string {
+  if (!STANDALONE_MODEL_ALIASES.has(model)) return model;
+  if (model === CHATGPT_WEB_LUNA_BACKEND_MODEL) return "chatgpt-web/gpt-5.6-luna";
+  if (!config.solAvailable) return "chatgpt-web/gpt-5.6-luna";
+  if (effort === "low") return "chatgpt-web/gpt-5.6-sol-instant";
+  if (effort === "max") return "chatgpt-web/gpt-5.6-pro";
+  return "chatgpt-web/gpt-5.6-sol";
+}
+
+export type ChatGptBrowserApiModelRoute = {
+  requestedModel: string;
+  canonicalModel: string;
+  route: ChatGptWebModelRoute;
+};
+
+export function routeChatGptBrowserApiModel(body: Record<string, unknown>, config: ChatGptBrowserApiConfig): ChatGptBrowserApiModelRoute {
+  const requestedModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : config.model;
+  const effort = reasoningEffort(body);
+  const canonicalModel = canonicalStandaloneModelId(requestedModel, effort, config);
+  const route = requireChatGptWebModelRoute(canonicalModel, config, effort);
+  return { requestedModel, canonicalModel, route };
+}
+
+export function availableChatGptBrowserApiModels(config: ChatGptBrowserApiConfig): string[] {
+  return availableChatGptWebModelRoutes(config).map(route => route.slug);
+}
+
+function adapterModelId(body: Record<string, unknown>, config: ChatGptBrowserApiConfig): string {
+  return routeChatGptBrowserApiModel(body, config).route.backendModel;
+}
+
+export function parseChatGptBrowserApiRequest(body: Record<string, unknown>, config: ChatGptBrowserApiConfig, kind: "chat" | "responses"): CodexParsedRequest {
+  const routing = routeChatGptBrowserApiModel(body, config);
   const transportBody = contextPacketBody(body, kind);
   const rawBody = rawBodyForAdapter(transportBody, kind, config);
   const reasoning = reasoningEffort(body);
-  return {
-    modelId: model,
+  const parsed: CodexParsedRequest = {
+    modelId: routing.route.backendModel,
     previousResponseId: typeof body.previous_response_id === "string" ? body.previous_response_id : undefined,
     context: {
       messages: [
@@ -1340,6 +1373,11 @@ function parsedRequest(body: Record<string, unknown>, config: ChatGptBrowserApiC
     },
     _rawBody: rawBody,
   };
+  if (routing.route.interactionMode === "automatic" && routing.route.modelFamily) parsed._chatgptModelFamily = routing.route.modelFamily;
+  parsed.options.reasoning = routing.route.interactionMode === "automatic"
+    ? routing.route.adapterEffort
+    : routing.route.codexEffort;
+  return parsed;
 }
 
 function textFromOutputItems(output: unknown[], finalOnly: boolean): string {
@@ -1744,10 +1782,11 @@ function directWorkspaceInspectionResult(body: Record<string, unknown>, config: 
 }
 
 async function runAdapter(body: Record<string, unknown>, config: ChatGptBrowserApiConfig, kind: "chat" | "responses", signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const requestedModel = routeChatGptBrowserApiModel(body, config).requestedModel;
   const directToolResult = directWorkspaceInspectionResult(body, config);
-  if (directToolResult) return directToolResult;
+  if (directToolResult) return { ...directToolResult, model: requestedModel };
   const directToolCall = directWorkspaceInspectionToolCall(body, config);
-  if (directToolCall) return directToolCall;
+  if (directToolCall) return { ...directToolCall, model: requestedModel };
   const missingWorkspace = missingWorkspaceBody(body, kind);
   if (missingWorkspace) {
     body = missingWorkspace;
@@ -1759,7 +1798,9 @@ async function runAdapter(body: Record<string, unknown>, config: ChatGptBrowserA
     body = normalizeWorkspacePathOnlyBody(body, config);
     body = ensureRequestMetadata(body);
   }
-  if (kind === "chat" && localInspectionRequested(body, config) && process.env.CHATGPT_BROWSER_API_FAST_LOCAL_INSPECTION !== "0") return localInspectionResponse(body, config);
+  if (kind === "chat" && localInspectionRequested(body, config) && process.env.CHATGPT_BROWSER_API_FAST_LOCAL_INSPECTION !== "0") {
+    return { ...localInspectionResponse(body, config), model: requestedModel };
+  }
   const toolContinuation = hasToolContinuation(body);
   let continuationKey: string | undefined;
   if (toolContinuation) {
@@ -1781,7 +1822,7 @@ async function runAdapter(body: Record<string, unknown>, config: ChatGptBrowserA
       let workingBody = body;
       let lastEvents: AdapterEvent[] = [];
       for (let round = 0; round < 4; round++) {
-        const parsed = parsedRequest(workingBody, config, kind);
+        const parsed = parseChatGptBrowserApiRequest(workingBody, config, kind);
         const events: AdapterEvent[] = [];
         await adapter.runTurn(parsed, { headers: new Headers(), abortSignal: signal }, event => events.push(event));
         lastEvents = events;
@@ -1791,12 +1832,12 @@ async function runAdapter(body: Record<string, unknown>, config: ChatGptBrowserA
           if (continuationKey) completedToolContinuations.set(continuationKey, Date.now());
           if (workingBody.__missing_workspace_prompt === true) response.__missing_workspace_prompt = true;
           if (workingBody.__suppress_local_tools_warning === true) response.__suppress_local_tools_warning = true;
-          return normalizeResponseForClient(response);
+          return { ...normalizeResponseForClient(response), model: requestedModel };
         }
         if (kind === "chat" && clientToolMode(workingBody, config)) {
           rememberToolTurn(calls, workingBody);
           startOrRenewToolLease(calls, workingBody);
-          return responseWithClientToolCalls(events, parsed.modelId);
+          return { ...responseWithClientToolCalls(events, parsed.modelId), model: requestedModel };
         }
         const results = await Promise.all(calls.map(call => executeLocalTool(call, workingBody)));
         workingBody = appendToolRound(workingBody, events, results);
@@ -1826,7 +1867,7 @@ async function serve(config = loadConfig()): Promise<void> {
       try {
         if (request.method === "GET" && url.pathname === "/healthz") return json({ ok: true, product: "chatgpt-browser-api", version: VERSION });
         if (!isAuthorized(request, config)) return unauthorized();
-        if (request.method === "GET" && url.pathname === "/v1/models") return json({ object: "list", data: config.models.map(id => ({ id, object: "model", owned_by: "chatgpt-browser-api" })) });
+        if (request.method === "GET" && url.pathname === "/v1/models") return json({ object: "list", data: availableChatGptBrowserApiModels(config).map(id => ({ id, object: "model", owned_by: "chatgpt-browser-api" })) });
         if (request.method === "GET" && url.pathname === "/v1/harness/status") return json({
           mode: config.mode || "browser-only",
           localToolsEnabled: config.mode === "full",
@@ -1937,7 +1978,9 @@ async function main(): Promise<void> {
   process.exit(2);
 }
 
-main().catch(error => {
-  process.stderr.write(`chatgpt-browser-api: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch(error => {
+    process.stderr.write(`chatgpt-browser-api: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}

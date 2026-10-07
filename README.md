@@ -153,6 +153,10 @@ Read the complete [architecture](docs/architecture.md) and
 [security model](docs/security-model.md) before enabling full mode. Report vulnerabilities through
 [SECURITY.md](SECURITY.md).
 
+Standalone integration: [ChatGPT Browser API][browser-api-doc].
+
+[browser-api-doc]: docs/chatgpt-browser-api.md
+
 Temporary Chat is a [ChatGPT privacy mode](https://help.openai.com/en/articles/8914046-temporary-chat-faq); prompts are still processed by OpenAI.
 
 Validation coverage: [release validation](docs/release-validation.md).

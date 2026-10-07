@@ -20,6 +20,39 @@ test("model selection recognizes Latest in the launcher languages without accept
   }
 });
 
+test("model selection accepts a visible view toggle without aria-hidden and rejects hidden toggles", async () => {
+  for (const [hidden, accepted] of [[false, true], [true, false]] as const) {
+    let clicked = false;
+    const option = {
+      count: async () => 1,
+      getAttribute: async () => "false",
+      waitFor: async () => {},
+      click: async () => {},
+    };
+    const trigger = {
+      count: async () => 1,
+      evaluate: async () => hidden,
+      click: async () => { clicked = true; },
+    };
+    const powerView = {
+      count: async () => 1,
+      getAttribute: async () => "simple",
+      locator: () => ({ filter: () => trigger }),
+    };
+    const menu = { menu: {
+      getByRole: () => option,
+      locator: () => powerView,
+    } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
+    const selectedMenu = { menu: {
+      getByRole: () => ({ ...option, getAttribute: async () => "true" }),
+    } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
+    const selection = selectChatGptModelFamily(menu, "5.6", async () => selectedMenu);
+    if (accepted) expect(await selection).toBe(selectedMenu);
+    else await expect(selection).rejects.toThrow("could not be selected and verified");
+    expect(clicked).toBe(accepted);
+  }
+});
+
 test("family confirmation separates Latest staging from the actual Pro response", () => {
   expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "5.6", "high")).toBe(true);
   expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(true);
