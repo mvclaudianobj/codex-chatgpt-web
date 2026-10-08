@@ -13,8 +13,9 @@ const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "prelo
 test("Bigger Context waits for startup and route recovery without invalidating healthy setup", async () => {
   const vm = require("node:vm");
   for (const fails of [false, true]) {
-    let completeAuthentication;
-    const startupAuthenticationRefresh = new Promise(resolve => { completeAuthentication = resolve; });
+    const startupAuthenticationRefresh = new Promise(() => {});
+    let completeRuntime;
+    const runtimeReady = new Promise(resolve => { completeRuntime = resolve; });
     let finishRuntimeStartup;
     const runtimeStartup = new Promise(resolve => { finishRuntimeStartup = resolve; });
     let startupSettled = false;
@@ -35,6 +36,7 @@ test("Bigger Context waits for startup and route recovery without invalidating h
         readConfig: () => config,
         startIfConfigured: async () => {
           calls.push("startup");
+          await runtimeReady;
           if (fails) throw new Error("actual startup failure");
           return { status: "ready" };
         },
@@ -56,10 +58,11 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     const start = electronMain.indexOf("} else void (async () => {");
     vm.runInContext(electronMain.slice(start + "} else ".length, electronMain.indexOf('  app.on("before-quit"', start)), context);
     const setting = handlers.get("launcher:bigger-context")({}, true);
-    // Read-only UI remains usable while authentication/startup is pending.
+    // Runtime startup proceeds even if the browser session check never completes.
+    // Settings still wait for runtime readiness, and read-only UI stays usable.
     assert.equal((await handlers.get("launcher:limits")()).enabled, false);
-    assert.deepEqual(calls, []);
-    completeAuthentication();
+    assert.deepEqual(calls, ["startup"]);
+    completeRuntime();
     await setting;
     assert.deepEqual(calls, fails ? ["startup", "recovery", "setting"] : ["startup", "route", "setting"]);
     assert.equal(state.experimentalBiggerContext, true);
@@ -275,7 +278,7 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
 test("Bigger Context startup recommendation reuses the persisted setting and setup transaction", () => {
   assert.match(
     appSource,
-    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\([\s\S]*?snapshot\.state\.browserInteractionMode === "automatic"[\s\S]*?snapshot\.state\.coreSetupComplete === true[\s\S]*?!snapshot\.state\.experimentalBiggerContext,/,
+    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\([\s\S]*?snapshot\.state\.browserInteractionMode === "automatic"[\s\S]*?snapshot\.state\.coreSetupComplete === true[\s\S]*?snapshot\.state\.biggerContextAvailable === true[\s\S]*?!snapshot\.state\.experimentalBiggerContext,/,
   );
   assert.match(appSource, /&& !biggerContextRecommendationOpen;/);
   assert.match(appSource, /updateState\(await api!\.setBiggerContext\(enabled\)\)/);
@@ -381,15 +384,15 @@ test("MCP verification proves runtime health before checking the connector", () 
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
 });
 
-test("saved ChatGPT authentication is refreshed before setup is presented", () => {
+test("saved ChatGPT authentication refresh does not gate local runtime startup", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
   const productionStartup = electronMain.indexOf("} else void (async () => {");
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
   const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
-  assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
-  assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
+  assert.equal(refreshBarrier, -1, "the bridge must start while ChatGPT is signed out or unavailable");
+  assert.ok(upgrade > productionStartup);
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
   assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
@@ -545,6 +548,11 @@ test("fresh-conversation snapshot uses runtime configuration and mode switching 
   }
   config = {};
   assert.equal((await snapshot()).state.experimentalFreshConversationPerTurn, false);
+  assert.equal((await snapshot()).state.biggerContextAvailable, false);
+  config.solAvailable = true;
+  assert.equal((await snapshot()).state.biggerContextAvailable, true);
+  config.solAvailable = false;
+  assert.equal((await snapshot()).state.biggerContextAvailable, false);
 });
 
 test("browser preference controls are translated, disabled in Zero Risk, and invoke their settings", async () => {
@@ -565,6 +573,7 @@ test("browser preference controls are translated, disabled in Zero Risk, and inv
     api: {
       setFreshConversationPerTurn: async enabled => { invocation = enabled; return { experimentalFreshConversationPerTurn: enabled }; },
       setAutoApproveToolCalls: async enabled => { invocation = enabled; return { autoApproveToolCalls: enabled }; },
+      setBiggerContext: async enabled => { invocation = enabled; return { experimentalBiggerContext: enabled }; },
     },
     messageOf: String, platformLabel: String,
   };
@@ -578,22 +587,26 @@ test("browser preference controls are translated, disabled in Zero Risk, and inv
     for (const [property, label, body, unavailable] of [
       ["experimentalFreshConversationPerTurn", "freshConversation", "freshConversationBody", "manualFreshConversationUnavailable"],
       ["autoApproveToolCalls", "autoApproveTools", "autoApproveToolsBody", "manualAutoApproveUnavailable"],
+      ["experimentalBiggerContext", "biggerContext", "biggerContextBody", "manualBiggerContextUnavailable"],
     ]) {
       for (const key of [label, body, unavailable, "toolApprovalNeeded", "toolApprovalPendingBody"]) {
         assert.equal(typeof copy[key], "string");
         assert.ok(copy[key].length > 5);
       }
+      for (const available of property === "experimentalBiggerContext" ? [true, false] : [true])
       for (const [mode, configured, enabled] of [["automatic", true, false], ["automatic", true, true], ["manual", true, true], ["automatic", false, false]]) {
         const tree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
-          snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: mode, coreSetupComplete: configured, [property]: enabled } },
+          snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: mode, coreSetupComplete: configured, biggerContextAvailable: available, [property]: enabled } },
           updateState: value => { saved = value; },
         });
         const row = visit(tree).find(node => node.type === "SettingRow" && node.props.label === copy[label]);
         assert.ok(row);
-        assert.equal(row.props.body, mode === "manual" ? copy[unavailable] : copy[body]);
+        assert.equal(row.props.body, mode === "manual" ? copy[unavailable]
+          : property === "experimentalBiggerContext" && !available ? copy.lunaBiggerContextUnavailable : copy[body]);
         const control = visit(row).find(node => node.type === "Switch");
         assert.equal(control.props.checked, property === "autoApproveToolCalls" && mode === "manual" ? false : enabled);
-        assert.equal(control.props.disabled, mode === "manual" || !configured);
+        assert.equal(control.props.disabled, mode === "manual" || !configured
+          || (property === "experimentalBiggerContext" && !available && !enabled));
         if (!control.props.disabled) {
           control.props.onChange(!enabled);
           await new Promise(resolve => setImmediate(resolve));

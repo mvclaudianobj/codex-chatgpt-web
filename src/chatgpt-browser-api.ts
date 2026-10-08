@@ -57,9 +57,10 @@ type ActiveAppInfo = {
   codexStorageStateFound: boolean;
 };
 
-const DEFAULT_MODEL = "gpt-5.6-sol";
+const DEFAULT_MODEL = "gpt-6-sol";
 const MARKSCODE_BROWSER_MODELS = ["browser-agent/gpt", "browser-agent-gpt"] as const;
-const STANDALONE_MODEL_ALIASES = new Set([DEFAULT_MODEL, CHATGPT_WEB_LUNA_BACKEND_MODEL, ...MARKSCODE_BROWSER_MODELS]);
+const GPT6_STANDALONE_MODEL_ALIASES = new Set([DEFAULT_MODEL]);
+const GPT56_STANDALONE_MODEL_ALIASES = new Set([CHATGPT_WEB_BACKEND_MODEL]);
 const MARKSCODE_LOCAL_API_KEYS = new Set(["local-proxy2", "marks-local2"]);
 const TOOL_TURN_TTL_MS = 30 * 60_000;
 const TOOL_CONTINUATION_TTL_MS = 10 * 60_000;
@@ -223,7 +224,7 @@ function defaultConfig(): ChatGptBrowserApiConfig {
     apiKey: randomBytes(32).toString("base64url"),
     controlToken: randomBytes(32).toString("base64url"),
     model: DEFAULT_MODEL,
-    models: [...MARKSCODE_BROWSER_MODELS, DEFAULT_MODEL, "gpt-5.6-luna"],
+    models: [...MARKSCODE_BROWSER_MODELS, DEFAULT_MODEL, CHATGPT_WEB_BACKEND_MODEL, CHATGPT_WEB_LUNA_BACKEND_MODEL],
     mode: "browser-only",
     contextWindow: CHATGPT_WEB_INSTANT_CONTEXT_WINDOW,
     browserHost: "managed-chrome",
@@ -1317,12 +1318,16 @@ function reasoningEffort(body: Record<string, unknown>): string | undefined {
 }
 
 function canonicalStandaloneModelId(model: string, effort: string | undefined, config: ChatGptBrowserApiConfig): string {
-  if (!STANDALONE_MODEL_ALIASES.has(model)) return model;
   if (model === CHATGPT_WEB_LUNA_BACKEND_MODEL) return "chatgpt-web/gpt-5.6-luna";
-  if (!config.solAvailable) return "chatgpt-web/gpt-5.6-luna";
-  if (effort === "low") return "chatgpt-web/gpt-5.6-sol-instant";
-  if (effort === "max") return "chatgpt-web/gpt-5.6-pro";
-  return "chatgpt-web/gpt-5.6-sol";
+  const genericAlias = MARKSCODE_BROWSER_MODELS.includes(model as typeof MARKSCODE_BROWSER_MODELS[number]);
+  const family = genericAlias || GPT6_STANDALONE_MODEL_ALIASES.has(model) ? "6"
+    : GPT56_STANDALONE_MODEL_ALIASES.has(model) ? "5.6"
+      : undefined;
+  if (!family) return model;
+  if (!config.solAvailable && genericAlias) return "chatgpt-web/gpt-5.6-luna";
+  if (effort === "low") return `chatgpt-web/gpt-${family}-sol-instant`;
+  if (effort === "max") return `chatgpt-web/gpt-${family}-pro`;
+  return `chatgpt-web/gpt-${family}-sol`;
 }
 
 export type ChatGptBrowserApiModelRoute = {

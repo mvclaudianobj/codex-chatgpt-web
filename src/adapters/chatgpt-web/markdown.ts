@@ -250,6 +250,7 @@ export class ChatGptMarkdownBuffer {
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
     private readonly stabilityMs = 750,
+    private readonly delivery: "stream" | "complete" = "stream",
   ) {
     if (!Number.isFinite(stabilityMs) || stabilityMs < 0) {
       throw new Error("ChatGPT Markdown stability window must be a non-negative finite number");
@@ -264,6 +265,9 @@ export class ChatGptMarkdownBuffer {
     }
     this.consistencyError = undefined;
     this.latest = reconciled.map(segment => ({ ...segment }));
+    // A compaction summary is delivered atomically. Until finish(), edits and reordering
+    // revise an undelivered draft rather than contradicting text already sent to Codex.
+    if (this.delivery === "complete") return "";
 
     const visibleCandidates = new Set<string>();
     for (const segment of reconciled) {
@@ -385,7 +389,9 @@ export class ChatGptMarkdownBuffer {
       }
 
       const followsVisibleCommittedTail = highestCommittedIndex === this.committed.length - 1;
-      if (!followsVisibleCommittedTail && !this.matchesLatestPending(segment)) {
+      // A known, undelivered paragraph also anchors new content after a virtualized
+      // committed tail. Earlier committed blocks are still checked above for edits/reordering.
+      if (!followsVisibleCommittedTail && !sawPending && !this.matchesLatestPending(segment)) {
         return new ChatGptMarkdownConsistencyError(
           "ChatGPT final DOM could not be aligned with text already streamed to Codex",
         );

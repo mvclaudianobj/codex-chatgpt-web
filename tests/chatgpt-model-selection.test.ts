@@ -3,7 +3,7 @@ import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adap
 
 test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
   for (const [label, accepted] of [
-    ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true],
+    ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true], ["6", true],
     ["GPT-5.6 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
   ] as const) {
     const menu = { menu: {
@@ -20,8 +20,8 @@ test("model selection recognizes Latest in the launcher languages without accept
   }
 });
 
-test("model selection accepts a visible view toggle without aria-hidden and rejects hidden toggles", async () => {
-  for (const [hidden, accepted] of [[false, true], [true, false]] as const) {
+test("model selection accepts a visible view toggle without aria-hidden and rejects inert toggles", async () => {
+  for (const [inert, accepted] of [[false, true], [true, false]] as const) {
     let clicked = false;
     const option = {
       count: async () => 1,
@@ -31,7 +31,7 @@ test("model selection accepts a visible view toggle without aria-hidden and reje
     };
     const trigger = {
       count: async () => 1,
-      evaluate: async () => hidden,
+      evaluate: async () => inert,
       click: async () => { clicked = true; },
     };
     const powerView = {
@@ -53,9 +53,13 @@ test("model selection accepts a visible view toggle without aria-hidden and reje
   }
 });
 
-test("family confirmation separates Latest staging from the actual Pro response", () => {
+test("family confirmation verifies the exact Sol or Pro version, including the old Latest picker", () => {
   expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "5.6", "high")).toBe(true);
-  expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(true);
+  expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(false);
+  expect(chatGptModelFamilyMatches(["6 Medium, 2 of 3.", "Medium"], "6", "medium")).toBe(true);
+  expect(chatGptModelFamilyMatches(["GPT-6 Sol Extra High, 4 of 5."], "6", "xhigh")).toBe(true);
+  expect(chatGptModelFamilyMatches(["GPT-6 Astra High, 3 of 5."], "6", "high")).toBe(false);
+  expect(chatGptModelFamilyMatches(["6.1 High, 3 of 5."], "6", "high")).toBe(false);
   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
   expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
   for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],

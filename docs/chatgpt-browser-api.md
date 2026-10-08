@@ -1,11 +1,11 @@
 # ChatGPT Browser API
 
 This branch adds a standalone, OpenAI-compatible HTTP API around the same authenticated ChatGPT
-Web adapter used by Codex ChatGPT Web. It is a local integration patch on top of upstream 6.1.4,
+Web adapter used by Codex ChatGPT Web. It is a local integration patch on top of upstream 6.1.6,
 not a replacement for the upstream launcher, native Codex route, release packages, or ChatGPT
 authentication. The patch adds the `chatgpt-browser-api` entry point, its lifecycle script, optional
 full-harness execution, request metadata, and Marks Commander metadata while retaining the upstream
-6.1.4 browser transport and model-selection safeguards.
+6.1.6 browser transport, startup recovery, model-selection, and context safeguards.
 
 The API is intended for trusted local clients. It does not bypass account capabilities or usage
 limits. Every completion request sends a real message through the signed-in ChatGPT Web account.
@@ -287,6 +287,8 @@ does not simply echo arbitrary aliases from `CHATGPT_BROWSER_API_MODELS`.
 | Canonical ID | Capability | Allowed `reasoning_effort` |
 | --- | --- | --- |
 | `chatgpt-web/gpt-5.6-luna` | Luna-only account | `low`, `medium` |
+| `chatgpt-web/gpt-6-sol-instant` | Sol available | `low` |
+| `chatgpt-web/gpt-6-sol` | Sol available | `medium`, `high`, and `xhigh` when Extra High is available |
 | `chatgpt-web/gpt-5.6-sol-instant` | Sol available | `low` |
 | `chatgpt-web/gpt-5.6-sol` | Sol available | `medium`, `high`, and `xhigh` when Extra High is available |
 | `chatgpt-web/gpt-5.6-pro` | Pro available | `max` |
@@ -296,11 +298,14 @@ The API also accepts `reasoning.effort`. Incoming `ultra` is normalized to `max`
 Pro routes are defined with `max`.
 
 Compatibility aliases remain accepted for saved clients and older tasks, including
-`gpt-5.6-sol`, `gpt-5.6-luna`, `browser-agent/gpt`, `browser-agent-gpt`,
+`gpt-6-sol`, `gpt-5.6-sol`, `gpt-5.6-luna`, `browser-agent/gpt`, `browser-agent-gpt`,
 `chatgpt-web/luna`, `chatgpt-web/think`, `chatgpt-web/light`, `chatgpt-web/medium`,
 `chatgpt-web/high`, `chatgpt-web/extra-high`, and `chatgpt-web/pro`. They are not advertised by the
 canonical `/v1/models` response. The generic standalone aliases resolve according to effective
-capabilities and effort; use canonical IDs for deterministic routing.
+capabilities and effort. `gpt-6-sol` and the generic browser-agent aliases select only GPT-6 routes;
+`gpt-5.6-sol` remains explicitly in the 5.6 family. On Luna-only accounts, only the generic
+browser-agent aliases may resolve to Luna; explicit family aliases fail closed. Use canonical IDs
+for deterministic routing.
 
 Manual launcher interaction mode exposes the separate Zero Risk routes instead of the automatic
 catalog. This guide's curl examples assume automatic interaction mode.
@@ -324,16 +329,16 @@ curl -fsS "$API_BASE/v1/models" \
   -H "Authorization: Bearer $API_KEY"
 ```
 
-Standard Sol at High:
+GPT-6 Sol at High:
 
 ```bash
 curl -fsS "$API_BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "chatgpt-web/gpt-5.6-sol",
+    "model": "chatgpt-web/gpt-6-sol",
     "reasoning_effort": "high",
-    "messages": [{"role": "user", "content": "Reply with exactly: SOL HIGH READY"}]
+    "messages": [{"role": "user", "content": "Reply with exactly: GPT-6 SOL HIGH READY"}]
   }'
 ```
 
@@ -465,13 +470,16 @@ newlines or quotes inside the value.
 ### A model is not announced or returns `400`
 
 Treat `/v1/models` as authoritative for the active account and launcher mode. Pro and GPT-6 require
-Pro capability; Luna is for Luna-only accounts; Extra High requires its separate capability. Use an
+the exact routes exposed by the 6.1.6 capability catalog; Luna is for Luna-only accounts; Extra High
+requires its separate capability. Use an
 allowed effort for the exact canonical route. The API intentionally rejects an invalid combination
 before opening a browser turn.
 
 ### Browser login or selector verification fails
 
-Open the production launcher, sign in to ChatGPT, and confirm the composer works interactively. If
+The 6.1.6 launcher retries recoverable browser startup failures and refreshes stale host state before
+surfacing a terminal error. Open the production launcher, sign in to ChatGPT, and confirm the composer
+works interactively. If
 model verification reports an unsupported language, set ChatGPT to English in Settings, reload, and
 retry. Inspect `./build_and_run.sh launcher-logs` for descriptor or browser failures.
 
@@ -510,7 +518,7 @@ Stop processes created by the lifecycle script:
 `stop` acts on the script's PID files. It does not terminate an unrelated launcher discovered only
 through an external descriptor. Check `status` after stopping.
 
-To roll back the patch without deleting account state, stop the API, restore the upstream 6.1.4
+To roll back the patch without deleting account state, stop the API, restore the upstream 6.1.6
 source files or checkout, and leave both homes untouched until rollback is verified. Removing
 `~/.codex-chatgpt-web` signs the launcher out and destroys its local profile; removing
 `~/.chatgpt-browser-api` deletes the standalone key and runtime state. Back up or remove those homes
